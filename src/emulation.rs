@@ -1,11 +1,11 @@
 use crate::listen::{LanMouseListener, ListenEvent, ListenerCreationError};
 use futures::StreamExt;
 use input_emulation::{EmulationHandle, InputEmulation, InputEmulationError};
-use input_event::Event;
+use input_event::{Event, KeyboardEvent, scancode};
 use lan_mouse_proto::{Position, ProtoEvent};
 use local_channel::mpsc::{Receiver, Sender, channel};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     net::SocketAddr,
     rc::Rc,
@@ -203,6 +203,7 @@ impl ListenTask {
 pub(crate) struct EmulationProxy {
     emulation_active: Rc<Cell<bool>>,
     exit_requested: Rc<Cell<bool>>,
+    meta_tap_detectors: Rc<RefCell<HashMap<SocketAddr, MetaTapDetector>>>,
     request_tx: Sender<ProxyRequest>,
     event_rx: Receiver<EmulationEvent>,
     task: JoinHandle<()>,
@@ -221,6 +222,7 @@ impl EmulationProxy {
         let (event_tx, event_rx) = channel();
         let emulation_active = Rc::new(Cell::new(false));
         let exit_requested = Rc::new(Cell::new(false));
+        let meta_tap_detectors = Rc::new(RefCell::new(HashMap::new()));
         let emulation_task = EmulationTask {
             backend,
             exit_requested: exit_requested.clone(),
@@ -233,6 +235,7 @@ impl EmulationProxy {
         Self {
             emulation_active,
             exit_requested,
+            meta_tap_detectors,
             request_tx,
             task,
             event_rx,
@@ -253,13 +256,22 @@ impl EmulationProxy {
     fn consume(&self, event: Event, addr: SocketAddr) {
         // ignore events if emulation is currently disabled
         if self.emulation_active.get() {
-            self.request_tx
-                .send(ProxyRequest::Input(event, addr))
-                .expect("channel closed");
+            let events = self
+                .meta_tap_detectors
+                .borrow_mut()
+                .entry(addr)
+                .or_default()
+                .filter(event);
+            for event in events {
+                self.request_tx
+                    .send(ProxyRequest::Input(event, addr))
+                    .expect("channel closed");
+            }
         }
     }
 
     fn remove(&self, addr: SocketAddr) {
+        self.meta_tap_detectors.borrow_mut().remove(&addr);
         self.request_tx
             .send(ProxyRequest::Remove(addr))
             .expect("channel closed");
@@ -277,6 +289,92 @@ impl EmulationProxy {
             .send(ProxyRequest::Terminate)
             .expect("channel closed");
         let _ = (&mut self.task).await;
+    }
+}
+
+#[derive(Default)]
+struct MetaTapDetector {
+    pending: Option<PendingMetaTap>,
+    swallow_next_modifier_release: bool,
+}
+
+struct PendingMetaTap {
+    key: u32,
+    buffered_events: Vec<Event>,
+}
+
+impl MetaTapDetector {
+    fn filter(&mut self, event: Event) -> Vec<Event> {
+        if self.swallow_next_modifier_release {
+            self.swallow_next_modifier_release = false;
+            if matches!(event, Event::Keyboard(KeyboardEvent::Modifiers { .. })) {
+                return Vec::new();
+            }
+        }
+
+        if let Some(mut pending) = self.pending.take() {
+            match event {
+                Event::Keyboard(KeyboardEvent::Modifiers { .. }) => {
+                    pending.buffered_events.push(event);
+                    self.pending = Some(pending);
+                    Vec::new()
+                }
+                Event::Keyboard(KeyboardEvent::Key { key, state: 0, .. })
+                    if key == pending.key =>
+                {
+                    launch_meta_tap_command();
+                    self.swallow_next_modifier_release = true;
+                    Vec::new()
+                }
+                _ => {
+                    let mut events = pending.buffered_events;
+                    events.push(event);
+                    events
+                }
+            }
+        } else if is_meta_press(event) {
+            let Event::Keyboard(KeyboardEvent::Key { key, .. }) = event else {
+                unreachable!("is_meta_press only matches keyboard key events");
+            };
+            self.pending = Some(PendingMetaTap {
+                key,
+                buffered_events: vec![event],
+            });
+            Vec::new()
+        } else {
+            vec![event]
+        }
+    }
+}
+
+fn is_meta_press(event: Event) -> bool {
+    matches!(
+        event,
+        Event::Keyboard(KeyboardEvent::Key {
+            key,
+            state: 1,
+            ..
+        }) if key == scancode::Linux::KeyLeftMeta as u32
+            || key == scancode::Linux::KeyRightmeta as u32
+    )
+}
+
+fn launch_meta_tap_command() {
+    let command = std::env::var("LAN_MOUSE_META_TAP_COMMAND")
+        .unwrap_or_else(|_| "$HOME/.local/bin/niri-shortcuts-grid".to_string());
+    let command = command.trim();
+    if command.is_empty() {
+        log::debug!("Lan Mouse Meta tap command is disabled");
+        return;
+    }
+
+    match std::process::Command::new("sh")
+        .arg("-lc")
+        .arg(command)
+        .spawn()
+    {
+        Ok(_) => log::info!("Lan Mouse Meta tap command spawned: {command}"),
+        Err(err) => log::warn!("failed to spawn Lan Mouse Meta tap command `{command}`: {err}"),
     }
 }
 

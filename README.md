@@ -23,6 +23,35 @@ Focus lies on performance, ease of use and a maintainable implementation that ca
     <img alt="Screenshot of Lan-Mouse" srcset="/screenshots/dark.png">
 </picture>
 
+## Niri Meta Tap Fork
+
+This fork carries a small receiver-side change for niri desktops that use a
+single Meta/Super tap to open a shortcut or command overlay.
+
+Lan Mouse can deliver the remote Meta key to niri, but niri may treat the remote
+modifier sequence differently from a physically attached keyboard. This fork
+detects a standalone left or right Meta tap before forwarding input to the
+emulation backend:
+
+- If Meta is pressed and released by itself, Lan Mouse suppresses that tap and
+  runs a command instead.
+- If Meta is combined with another key or input event, the buffered events are
+  forwarded unchanged so normal shortcuts keep working.
+- Detection is tracked per remote peer, so one sender's pending Meta tap does
+  not affect another sender.
+
+The command is configured with `LAN_MOUSE_META_TAP_COMMAND`:
+
+```sh
+LAN_MOUSE_META_TAP_COMMAND="$HOME/.local/bin/niri-shortcuts-grid" lan-mouse daemon
+```
+
+If the variable is not set, it defaults to
+`$HOME/.local/bin/niri-shortcuts-grid`. Set it to an empty string to disable the
+Meta tap command hook.
+
+The code change is limited to `src/emulation.rs`.
+
 
 ## Encryption
 

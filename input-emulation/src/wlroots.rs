@@ -184,6 +184,8 @@ struct VirtualInput {
 
 impl VirtualInput {
     fn consume_event(&self, event: Event) -> Result<(), ()> {
+        // The peer's clock and time unit depend on its capture backend.
+        // Use local milliseconds for clients that compare input timestamps.
         let now: u32 = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -192,18 +194,14 @@ impl VirtualInput {
         match event {
             Event::Pointer(e) => {
                 match e {
-                    PointerEvent::Motion { time, dx, dy } => self.pointer.motion(time, dx, dy),
-                    PointerEvent::Button {
-                        time,
-                        button,
-                        state,
-                    } => {
+                    PointerEvent::Motion { dx, dy, .. } => self.pointer.motion(now, dx, dy),
+                    PointerEvent::Button { button, state, .. } => {
                         let state: ButtonState = state.try_into()?;
-                        self.pointer.button(time, button, state);
+                        self.pointer.button(now, button, state);
                     }
-                    PointerEvent::Axis { time, axis, value } => {
+                    PointerEvent::Axis { axis, value, .. } => {
                         let axis: Axis = (axis as u32).try_into()?;
-                        self.pointer.axis(time, axis, value);
+                        self.pointer.axis(now, axis, value);
                         self.pointer.frame();
                     }
                     PointerEvent::AxisDiscrete120 { axis, value } => {
@@ -217,8 +215,8 @@ impl VirtualInput {
                 self.pointer.frame();
             }
             Event::Keyboard(e) => match e {
-                KeyboardEvent::Key { time, key, state } => {
-                    self.keyboard.key(time, key, state as u32);
+                KeyboardEvent::Key { key, state, .. } => {
+                    self.keyboard.key(now, key, state as u32);
                     if let Ok(mut mods) = self.modifiers.lock() {
                         if mods.update_by_key_event(key, state) {
                             log::trace!("Key triggers modifier change: {mods:?}");
